@@ -44,6 +44,15 @@ local debounce_timer = nil
 local symbols = vim.deepcopy(default_symbols)
 local show_directory_status = true
 
+-- Default keymaps (only active in oil buffers)
+local keymaps = {
+	refresh = "gr", -- Set to false to disable
+	toggle = "gd", -- Set to false to disable
+}
+
+-- Track if keymaps have been registered with oil's config (for help display)
+local keymaps_registered = false
+
 -- Track pending async requests to avoid duplicate calls
 local pending_requests = {}
 
@@ -517,6 +526,46 @@ local function setup_autocmds()
 	})
 end
 
+-- Set up buffer-local keymaps for oil buffers
+local function setup_keymaps(bufnr)
+	-- Register with oil's config once (so keymaps appear in g? help)
+	if not keymaps_registered then
+		local ok, oil_config = pcall(require, "oil.config")
+		if ok and oil_config.keymaps then
+			if keymaps.refresh then
+				oil_config.keymaps[keymaps.refresh] = {
+					callback = function()
+						M.refresh()
+					end,
+					desc = "Refresh git-oil status",
+				}
+			end
+			if keymaps.toggle then
+				oil_config.keymaps[keymaps.toggle] = {
+					callback = function()
+						M.toggle()
+					end,
+					desc = "Toggle git-oil",
+				}
+			end
+			keymaps_registered = true
+		end
+	end
+
+	-- Set buffer-local keymaps for the current buffer
+	if keymaps.refresh then
+		vim.keymap.set("n", keymaps.refresh, function()
+			M.refresh()
+		end, { buffer = bufnr, desc = "Refresh git-oil status" })
+	end
+
+	if keymaps.toggle then
+		vim.keymap.set("n", keymaps.toggle, function()
+			M.toggle()
+		end, { buffer = bufnr, desc = "Toggle git-oil" })
+	end
+end
+
 -- Track if plugin has been initialized
 local initialized = false
 
@@ -563,14 +612,20 @@ function M.setup(opts)
 		M.enabled = opts.enabled
 	end
 
+	-- Allow customizing keymaps
+	if opts.keymaps then
+		keymaps = vim.tbl_extend("force", keymaps, opts.keymaps)
+	end
+
 	initialize()
 end
 
 -- Auto-initialize when oil buffer is entered (if not already done)
 vim.api.nvim_create_autocmd("FileType", {
 	pattern = "oil",
-	callback = function()
+	callback = function(args)
 		initialize()
+		setup_keymaps(args.buf)
 	end,
 	group = vim.api.nvim_create_augroup("OilGitAutoInit", { clear = true }),
 })
