@@ -50,6 +50,9 @@ local keymaps = {
 	toggle = "gd", -- Set to false to disable
 }
 
+-- Track if keymaps have been registered with oil's config (for help display)
+local keymaps_registered = false
+
 -- Track pending async requests to avoid duplicate calls
 local pending_requests = {}
 
@@ -525,6 +528,31 @@ end
 
 -- Set up buffer-local keymaps for oil buffers
 local function setup_keymaps(bufnr)
+	-- Register with oil's config once (so keymaps appear in g? help)
+	if not keymaps_registered then
+		local ok, oil_config = pcall(require, "oil.config")
+		if ok and oil_config.keymaps then
+			if keymaps.refresh then
+				oil_config.keymaps[keymaps.refresh] = {
+					callback = function()
+						M.refresh()
+					end,
+					desc = "Refresh git-oil status",
+				}
+			end
+			if keymaps.toggle then
+				oil_config.keymaps[keymaps.toggle] = {
+					callback = function()
+						M.toggle()
+					end,
+					desc = "Toggle git-oil",
+				}
+			end
+			keymaps_registered = true
+		end
+	end
+
+	-- Set buffer-local keymaps for the current buffer
 	if keymaps.refresh then
 		vim.keymap.set("n", keymaps.refresh, function()
 			M.refresh()
