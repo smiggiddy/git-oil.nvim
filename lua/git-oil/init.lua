@@ -44,6 +44,12 @@ local debounce_timer = nil
 local symbols = vim.deepcopy(default_symbols)
 local show_directory_status = true
 
+-- Default keymaps (only active in oil buffers)
+local keymaps = {
+	refresh = "gr", -- Set to false to disable
+	toggle = "gd", -- Set to false to disable
+}
+
 -- Track pending async requests to avoid duplicate calls
 local pending_requests = {}
 
@@ -517,6 +523,21 @@ local function setup_autocmds()
 	})
 end
 
+-- Set up buffer-local keymaps for oil buffers
+local function setup_keymaps(bufnr)
+	if keymaps.refresh then
+		vim.keymap.set("n", keymaps.refresh, function()
+			M.refresh()
+		end, { buffer = bufnr, desc = "Refresh git-oil status" })
+	end
+
+	if keymaps.toggle then
+		vim.keymap.set("n", keymaps.toggle, function()
+			M.toggle()
+		end, { buffer = bufnr, desc = "Toggle git-oil" })
+	end
+end
+
 -- Track if plugin has been initialized
 local initialized = false
 
@@ -563,14 +584,20 @@ function M.setup(opts)
 		M.enabled = opts.enabled
 	end
 
+	-- Allow customizing keymaps
+	if opts.keymaps then
+		keymaps = vim.tbl_extend("force", keymaps, opts.keymaps)
+	end
+
 	initialize()
 end
 
 -- Auto-initialize when oil buffer is entered (if not already done)
 vim.api.nvim_create_autocmd("FileType", {
 	pattern = "oil",
-	callback = function()
+	callback = function(args)
 		initialize()
+		setup_keymaps(args.buf)
 	end,
 	group = vim.api.nvim_create_augroup("OilGitAutoInit", { clear = true }),
 })

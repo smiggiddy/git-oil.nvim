@@ -17,6 +17,7 @@ Based on [oil-git.nvim](https://github.com/benomahony/oil-git.nvim) by Ben O'Mah
 - Auto-refresh when returning from terminal (lazygit, etc.)
 - Respects your colorscheme (only sets highlights if not already defined)
 - **Enable/disable toggle** - turn the plugin on/off at runtime
+- **Buffer-local keymaps** - `gr` to refresh, `gd` to toggle (customizable)
 
 ## Status Indicators
 
@@ -73,6 +74,13 @@ require("git-oil").setup({
   -- Debounce delay in milliseconds (default: 200)
   debounce_delay = 200,
 
+  -- Keymaps (only active in oil buffers)
+  -- Set to false to disable a keymap
+  keymaps = {
+    refresh = "gr", -- Refresh git status
+    toggle = "gd",  -- Toggle plugin on/off
+  },
+
   -- Customize status symbols
   symbols = {
     added = "+",
@@ -106,6 +114,26 @@ require("git-oil").setup({
 ## Usage
 
 The plugin works automatically once installed. Open any directory with oil.nvim and git-tracked files will show their status.
+
+### Keymaps
+
+These keymaps are available in oil buffers by default:
+
+| Key | Action |
+|-----|--------|
+| `gr` | Refresh git status |
+| `gd` | Toggle plugin on/off |
+
+To customize or disable keymaps:
+
+```lua
+require("git-oil").setup({
+  keymaps = {
+    refresh = "<leader>gr", -- Custom key
+    toggle = false,         -- Disable this keymap
+  },
+})
+```
 
 ### API
 
