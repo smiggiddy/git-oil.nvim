@@ -5,6 +5,9 @@
 
 local M = {}
 
+-- Plugin enabled state
+M.enabled = true
+
 -- Default highlight colors (only used if not already defined)
 local default_highlights = {
 	OilGitAdded = { fg = "#a6e3a1" },
@@ -12,6 +15,12 @@ local default_highlights = {
 	OilGitRenamed = { fg = "#cba6f7" },
 	OilGitDeleted = { fg = "#f38ba8" },
 	OilGitUntracked = { fg = "#89b4fa" },
+	OilGitConflict = { fg = "#f38ba8", bold = true },
+	OilGitStagedModified = { fg = "#a6e3a1" },
+	OilGitUnstagedModified = { fg = "#f9e2af" },
+	OilGitPartiallyStaged = { fg = "#fab387" },
+	OilGitStagedDeleted = { fg = "#a6e3a1" },
+	OilGitUnstagedDeleted = { fg = "#f38ba8" },
 }
 
 -- Default symbols for git status indicators
@@ -21,6 +30,10 @@ local default_symbols = {
 	renamed = "→",
 	deleted = "✗",
 	untracked = "?",
+	conflict = "!",
+	staged = "●",
+	unstaged = "○",
+	partially_staged = "±",
 }
 
 -- Cache for git status results
@@ -29,6 +42,106 @@ local cache_timeout = 2000 -- 2 seconds
 local debounce_delay = 200 -- milliseconds
 local debounce_timer = nil
 local symbols = vim.deepcopy(default_symbols)
+local show_directory_status = true
+
+-- Track pending async requests to avoid duplicate calls
+local pending_requests = {}
+
+-- Check if async git status is available (Neovim 0.10+)
+local has_async = vim.fn.has("nvim-0.10") == 1
+
+-- Priority order for status codes (higher = more important)
+local status_priority = {
+	conflict = 6,
+	partially_staged = 5,
+	modified = 4,
+	added = 3,
+	renamed = 2,
+	deleted = 2,
+	untracked = 1,
+}
+
+-- Map status codes to priority categories
+local function get_status_priority(status_code)
+	if not status_code then
+		return 0
+	end
+
+	local first_char = status_code:sub(1, 1)
+	local second_char = status_code:sub(2, 2)
+
+	-- Conflicts
+	if status_code == "UU" or status_code == "AA" or status_code == "DD"
+		or status_code == "AU" or status_code == "UA"
+		or status_code == "DU" or status_code == "UD" then
+		return status_priority.conflict
+	end
+
+	-- Partially staged
+	if status_code == "MM" or status_code == "MD" or status_code == "AM" or status_code == "AD" then
+		return status_priority.partially_staged
+	end
+
+	-- Modified (staged or unstaged)
+	if first_char == "M" or second_char == "M" then
+		return status_priority.modified
+	end
+
+	-- Added
+	if first_char == "A" then
+		return status_priority.added
+	end
+
+	-- Renamed
+	if first_char == "R" then
+		return status_priority.renamed
+	end
+
+	-- Deleted
+	if first_char == "D" or second_char == "D" then
+		return status_priority.deleted
+	end
+
+	-- Untracked
+	if status_code == "??" then
+		return status_priority.untracked
+	end
+
+	return 0
+end
+
+-- Propagate file status to parent directories
+local function propagate_directory_status(file_status, git_root)
+	if not show_directory_status then
+		return file_status
+	end
+
+	local dir_status = {}
+
+	for filepath, status_code in pairs(file_status) do
+		-- Walk up the directory tree from the file to the git root
+		local parent = vim.fn.fnamemodify(filepath, ":h")
+
+		while parent and parent ~= git_root and #parent > #git_root do
+			-- Ensure the path ends with / for directory matching
+			local dir_path = parent:sub(-1) == "/" and parent or parent .. "/"
+
+			local current_priority = get_status_priority(dir_status[dir_path])
+			local new_priority = get_status_priority(status_code)
+
+			-- Keep the higher priority status
+			if new_priority > current_priority then
+				dir_status[dir_path] = status_code
+			end
+
+			-- Move to parent directory
+			parent = vim.fn.fnamemodify(parent, ":h")
+		end
+	end
+
+	-- Merge directory status with file status
+	return vim.tbl_extend("keep", file_status, dir_status)
+end
 
 local function setup_highlights()
 	-- Only set highlight if it doesn't already exist (respects colorscheme)
@@ -48,26 +161,8 @@ local function get_git_root(path)
 	return vim.fn.fnamemodify(git_dir, ":p:h:h")
 end
 
-local function get_git_status(dir)
-	local git_root = get_git_root(dir)
-	if not git_root then
-		return {}
-	end
-
-	-- Check cache
-	local now = vim.loop.now()
-	local cached = status_cache[git_root]
-	if cached and (now - cached.timestamp) < cache_timeout then
-		return cached.status
-	end
-
-	local cmd = string.format("cd %s && git status --porcelain", vim.fn.shellescape(git_root))
-	local output = vim.fn.system(cmd)
-
-	if vim.v.shell_error ~= 0 then
-		return {}
-	end
-
+-- Parse git status output into a status table
+local function parse_git_status_output(output, git_root)
 	local status = {}
 	for line in output:gmatch("[^\r\n]+") do
 		if #line >= 3 then
@@ -94,6 +189,33 @@ local function get_git_status(dir)
 		end
 	end
 
+	-- Propagate status to parent directories
+	return propagate_directory_status(status, git_root)
+end
+
+-- Synchronous git status (fallback for Neovim < 0.10)
+local function get_git_status_sync(dir)
+	local git_root = get_git_root(dir)
+	if not git_root then
+		return {}
+	end
+
+	-- Check cache
+	local now = vim.loop.now()
+	local cached = status_cache[git_root]
+	if cached and (now - cached.timestamp) < cache_timeout then
+		return cached.status
+	end
+
+	local cmd = string.format("cd %s && git status --porcelain", vim.fn.shellescape(git_root))
+	local output = vim.fn.system(cmd)
+
+	if vim.v.shell_error ~= 0 then
+		return {}
+	end
+
+	local status = parse_git_status_output(output, git_root)
+
 	-- Cache the result
 	status_cache[git_root] = {
 		status = status,
@@ -101,6 +223,69 @@ local function get_git_status(dir)
 	}
 
 	return status
+end
+
+-- Async git status (Neovim 0.10+)
+local function get_git_status_async(dir, callback)
+	local git_root = get_git_root(dir)
+	if not git_root then
+		callback({})
+		return
+	end
+
+	-- Check cache
+	local now = vim.loop.now()
+	local cached = status_cache[git_root]
+	if cached and (now - cached.timestamp) < cache_timeout then
+		callback(cached.status)
+		return
+	end
+
+	-- Check if there's already a pending request for this git root
+	if pending_requests[git_root] then
+		-- Add callback to pending request
+		table.insert(pending_requests[git_root], callback)
+		return
+	end
+
+	-- Start a new pending request
+	pending_requests[git_root] = { callback }
+
+	vim.system(
+		{ "git", "-C", git_root, "status", "--porcelain" },
+		{ text = true },
+		function(result)
+			vim.schedule(function()
+				local status = {}
+				if result.code == 0 and result.stdout then
+					status = parse_git_status_output(result.stdout, git_root)
+
+					-- Cache the result
+					status_cache[git_root] = {
+						status = status,
+						timestamp = vim.loop.now(),
+					}
+				end
+
+				-- Call all pending callbacks
+				local callbacks = pending_requests[git_root] or {}
+				pending_requests[git_root] = nil
+
+				for _, cb in ipairs(callbacks) do
+					cb(status)
+				end
+			end)
+		end
+	)
+end
+
+-- Get git status (uses async when available)
+local function get_git_status(dir, callback)
+	if has_async and callback then
+		get_git_status_async(dir, callback)
+	else
+		return get_git_status_sync(dir)
+	end
 end
 
 local function get_highlight_group(status_code)
@@ -111,27 +296,53 @@ local function get_highlight_group(status_code)
 	local first_char = status_code:sub(1, 1)
 	local second_char = status_code:sub(2, 2)
 
-	-- Check staged changes first (prioritize staged over unstaged)
-	if first_char == "A" then
-		return "OilGitAdded", symbols.added
-	elseif first_char == "M" then
-		return "OilGitModified", symbols.modified
-	elseif first_char == "R" then
-		return "OilGitRenamed", symbols.renamed
-	elseif first_char == "D" then
-		return "OilGitDeleted", symbols.deleted
+	-- Check for merge conflicts first (highest priority)
+	-- UU = both modified, AA = both added, DD = both deleted
+	-- AU/UA = added by us/them, DU/UD = deleted by us/them
+	if status_code == "UU" or status_code == "AA" or status_code == "DD"
+		or status_code == "AU" or status_code == "UA"
+		or status_code == "DU" or status_code == "UD" then
+		return "OilGitConflict", symbols.conflict
 	end
 
-	-- Check unstaged changes
-	if second_char == "M" then
-		return "OilGitModified", symbols.modified
-	elseif second_char == "D" then
-		return "OilGitDeleted", symbols.deleted
+	-- Check for partially staged files (both staged and unstaged changes)
+	if status_code == "MM" or status_code == "MD" or status_code == "AM" or status_code == "AD" then
+		return "OilGitPartiallyStaged", symbols.partially_staged
 	end
 
 	-- Untracked files
 	if status_code == "??" then
 		return "OilGitUntracked", symbols.untracked
+	end
+
+	-- Staged additions (A followed by space or M)
+	if first_char == "A" and second_char == " " then
+		return "OilGitAdded", symbols.added
+	end
+
+	-- Staged modifications (M followed by space)
+	if first_char == "M" and second_char == " " then
+		return "OilGitStagedModified", symbols.staged
+	end
+
+	-- Unstaged modifications (space followed by M)
+	if first_char == " " and second_char == "M" then
+		return "OilGitUnstagedModified", symbols.unstaged
+	end
+
+	-- Renamed files (staged)
+	if first_char == "R" then
+		return "OilGitRenamed", symbols.renamed
+	end
+
+	-- Staged deletions (D followed by space)
+	if first_char == "D" and second_char == " " then
+		return "OilGitStagedDeleted", symbols.staged
+	end
+
+	-- Unstaged deletions (space followed by D)
+	if first_char == " " and second_char == "D" then
+		return "OilGitUnstagedDeleted", symbols.unstaged
 	end
 
 	return nil, nil
@@ -143,39 +354,39 @@ local function clear_highlights()
 	vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
 end
 
-local function apply_git_highlights()
+-- Apply highlights to current buffer given git status
+local function apply_highlights_to_buffer(git_status, current_dir)
 	local oil = require("oil")
-	local current_dir = oil.get_current_dir()
-
-	if not current_dir then
-		clear_highlights()
-		return
-	end
-
-	local git_status = get_git_status(current_dir)
-	if vim.tbl_isempty(git_status) then
-		clear_highlights()
-		return
-	end
-
 	local bufnr = vim.api.nvim_get_current_buf()
+
+	-- Verify we're still in the same oil buffer
+	if vim.bo[bufnr].filetype ~= "oil" then
+		return
+	end
+
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
 	clear_highlights()
 
 	for i, line in ipairs(lines) do
 		local entry = oil.get_entry_on_line(bufnr, i)
-		if entry and entry.type == "file" then
-			local filepath = current_dir .. entry.name
+		if entry and (entry.type == "file" or entry.type == "directory") then
+			local filepath
+			if entry.type == "file" then
+				filepath = current_dir .. entry.name
+			else
+				-- Directories use trailing slash for matching
+				filepath = current_dir .. entry.name .. "/"
+			end
 
 			local status_code = git_status[filepath]
 			local hl_group, symbol = get_highlight_group(status_code)
 
 			if hl_group and symbol then
-				-- Find the filename part in the line and highlight it
+				-- Find the entry name part in the line and highlight it
 				local name_start = line:find(entry.name, 1, true)
 				if name_start then
-					-- Highlight the filename
+					-- Highlight the entry name
 					vim.fn.matchaddpos(hl_group, { { i, name_start, #entry.name } })
 
 					-- Add symbol as virtual text at the end of the line
@@ -188,6 +399,41 @@ local function apply_git_highlights()
 				end
 			end
 		end
+	end
+end
+
+local function apply_git_highlights()
+	-- Skip if plugin is disabled
+	if not M.enabled then
+		clear_highlights()
+		return
+	end
+
+	local oil = require("oil")
+	local current_dir = oil.get_current_dir()
+
+	if not current_dir then
+		clear_highlights()
+		return
+	end
+
+	if has_async then
+		-- Use async version
+		get_git_status(current_dir, function(git_status)
+			if vim.tbl_isempty(git_status) then
+				clear_highlights()
+				return
+			end
+			apply_highlights_to_buffer(git_status, current_dir)
+		end)
+	else
+		-- Use sync version
+		local git_status = get_git_status(current_dir)
+		if vim.tbl_isempty(git_status) then
+			clear_highlights()
+			return
+		end
+		apply_highlights_to_buffer(git_status, current_dir)
 	end
 end
 
@@ -299,6 +545,16 @@ function M.setup(opts)
 		symbols = vim.tbl_extend("force", symbols, opts.symbols)
 	end
 
+	-- Allow disabling directory status propagation
+	if opts.show_directory_status ~= nil then
+		show_directory_status = opts.show_directory_status
+	end
+
+	-- Allow starting disabled
+	if opts.enabled ~= nil then
+		M.enabled = opts.enabled
+	end
+
 	initialize()
 end
 
@@ -315,6 +571,41 @@ vim.api.nvim_create_autocmd("FileType", {
 function M.refresh()
 	status_cache = {}
 	apply_git_highlights()
+end
+
+-- Clear highlights from all oil buffers
+local function clear_all_oil_highlights()
+	local ns_id = vim.api.nvim_create_namespace("oil_git_status")
+	for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].filetype == "oil" then
+			vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
+			-- Also clear matches if it's the current buffer
+			if bufnr == vim.api.nvim_get_current_buf() then
+				vim.fn.clearmatches()
+			end
+		end
+	end
+end
+
+-- Enable the plugin
+function M.enable()
+	M.enabled = true
+	M.refresh()
+end
+
+-- Disable the plugin
+function M.disable()
+	M.enabled = false
+	clear_all_oil_highlights()
+end
+
+-- Toggle the plugin
+function M.toggle()
+	if M.enabled then
+		M.disable()
+	else
+		M.enable()
+	end
 end
 
 return M
