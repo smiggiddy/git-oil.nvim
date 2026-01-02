@@ -348,25 +348,33 @@ local function get_highlight_group(status_code)
 	return nil, nil
 end
 
-local function clear_highlights()
-	vim.fn.clearmatches()
+local function clear_highlights(bufnr)
+	bufnr = bufnr or 0
 	local ns_id = vim.api.nvim_create_namespace("oil_git_status")
-	vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+	vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
 end
 
 -- Apply highlights to current buffer given git status
-local function apply_highlights_to_buffer(git_status, current_dir)
+local function apply_highlights_to_buffer(git_status, current_dir, target_bufnr)
 	local oil = require("oil")
-	local bufnr = vim.api.nvim_get_current_buf()
+	local bufnr = target_bufnr or vim.api.nvim_get_current_buf()
 
-	-- Verify we're still in the same oil buffer
-	if vim.bo[bufnr].filetype ~= "oil" then
+	-- Verify buffer is still valid and is an oil buffer
+	if not vim.api.nvim_buf_is_valid(bufnr) or vim.bo[bufnr].filetype ~= "oil" then
 		return
 	end
 
+	-- Verify we're still in the same directory (for async calls)
+	local new_dir = oil.get_current_dir(bufnr)
+	if new_dir ~= current_dir then
+		return
+	end
+
+	local ns_id = vim.api.nvim_create_namespace("oil_git_status")
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-	clear_highlights()
+	-- Clear existing highlights for this buffer
+	vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
 
 	for i, line in ipairs(lines) do
 		local entry = oil.get_entry_on_line(bufnr, i)
@@ -386,15 +394,12 @@ local function apply_highlights_to_buffer(git_status, current_dir)
 				-- Find the entry name part in the line and highlight it
 				local name_start = line:find(entry.name, 1, true)
 				if name_start then
-					-- Highlight the entry name
-					vim.fn.matchaddpos(hl_group, { { i, name_start, #entry.name } })
-
-					-- Add symbol as virtual text at the end of the line
-					local ns_id = vim.api.nvim_create_namespace("oil_git_status")
-					vim.api.nvim_buf_set_extmark(bufnr, ns_id, i - 1, 0, {
+					-- Single extmark for both text highlight and virtual text symbol
+					vim.api.nvim_buf_set_extmark(bufnr, ns_id, i - 1, name_start - 1, {
+						end_col = name_start - 1 + #entry.name,
+						hl_group = hl_group,
 						virt_text = { { " " .. symbol, hl_group } },
 						virt_text_pos = "eol",
-						hl_mode = "combine",
 					})
 				end
 			end
@@ -410,30 +415,31 @@ local function apply_git_highlights()
 	end
 
 	local oil = require("oil")
-	local current_dir = oil.get_current_dir()
+	local bufnr = vim.api.nvim_get_current_buf()
+	local current_dir = oil.get_current_dir(bufnr)
 
 	if not current_dir then
-		clear_highlights()
+		clear_highlights(bufnr)
 		return
 	end
 
 	if has_async then
-		-- Use async version
+		-- Use async version - capture buffer ID for callback
 		get_git_status(current_dir, function(git_status)
 			if vim.tbl_isempty(git_status) then
-				clear_highlights()
+				clear_highlights(bufnr)
 				return
 			end
-			apply_highlights_to_buffer(git_status, current_dir)
+			apply_highlights_to_buffer(git_status, current_dir, bufnr)
 		end)
 	else
 		-- Use sync version
 		local git_status = get_git_status(current_dir)
 		if vim.tbl_isempty(git_status) then
-			clear_highlights()
+			clear_highlights(bufnr)
 			return
 		end
-		apply_highlights_to_buffer(git_status, current_dir)
+		apply_highlights_to_buffer(git_status, current_dir, bufnr)
 	end
 end
 
@@ -579,10 +585,6 @@ local function clear_all_oil_highlights()
 	for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
 		if vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].filetype == "oil" then
 			vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
-			-- Also clear matches if it's the current buffer
-			if bufnr == vim.api.nvim_get_current_buf() then
-				vim.fn.clearmatches()
-			end
 		end
 	end
 end
