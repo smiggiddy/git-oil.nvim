@@ -466,7 +466,9 @@ local function setup_autocmds()
 	vim.api.nvim_create_autocmd("BufLeave", {
 		group = group,
 		pattern = "oil://*",
-		callback = clear_highlights,
+		callback = function(args)
+			clear_highlights(args.buf)
+		end,
 	})
 
 	-- Use debounced version for rapid-fire events
