@@ -4,6 +4,8 @@ Git status integration for [oil.nvim](https://github.com/stevearc/oil.nvim). Sho
 
 Based on [oil-git.nvim](https://github.com/benomahony/oil-git.nvim) by Ben O'Mahony, with performance improvements including caching and debouncing.
 
+![screenshot](screenshot.png)
+
 ## Features
 
 - Colored filenames based on git status
