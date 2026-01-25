@@ -43,6 +43,7 @@ local debounce_delay = 200 -- milliseconds
 local debounce_timer = nil
 local symbols = vim.deepcopy(default_symbols)
 local show_directory_status = true
+local color_directory_slash = true
 
 -- Default keymaps (only active in oil buffers)
 local keymaps = {
@@ -403,9 +404,15 @@ local function apply_highlights_to_buffer(git_status, current_dir, target_bufnr)
 				-- Find the entry name part in the line and highlight it
 				local name_start = line:find(entry.name, 1, true)
 				if name_start then
+					-- Calculate highlight length (include trailing "/" for directories if enabled)
+					local hl_length = #entry.name
+					if entry.type == "directory" and color_directory_slash then
+						hl_length = hl_length + 1
+					end
+
 					-- Single extmark for both text highlight and virtual text symbol
 					vim.api.nvim_buf_set_extmark(bufnr, ns_id, i - 1, name_start - 1, {
-						end_col = name_start - 1 + #entry.name,
+						end_col = name_start - 1 + hl_length,
 						hl_group = hl_group,
 						virt_text = { { " " .. symbol, hl_group } },
 						virt_text_pos = "eol",
@@ -454,6 +461,12 @@ end
 
 -- Debounced version for frequent events
 local function apply_git_highlights_debounced()
+	-- Skip debounce if delay is 0 or negative
+	if debounce_delay <= 0 then
+		apply_git_highlights()
+		return
+	end
+
 	if debounce_timer then
 		debounce_timer:stop()
 	end
@@ -605,6 +618,11 @@ function M.setup(opts)
 	-- Allow disabling directory status propagation
 	if opts.show_directory_status ~= nil then
 		show_directory_status = opts.show_directory_status
+	end
+
+	-- Allow disabling directory slash coloring
+	if opts.color_directory_slash ~= nil then
+		color_directory_slash = opts.color_directory_slash
 	end
 
 	-- Allow starting disabled

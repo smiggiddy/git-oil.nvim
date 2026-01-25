@@ -70,10 +70,14 @@ require("git-oil").setup({
   -- Directories will show the status of their "most important" child
   show_directory_status = true,
 
+  -- Color the trailing "/" on directories (default: true)
+  color_directory_slash = true,
+
   -- Cache timeout in milliseconds (default: 2000)
   cache_timeout = 2000,
 
   -- Debounce delay in milliseconds (default: 200)
+  -- Set to 0 to disable debouncing
   debounce_delay = 200,
 
   -- Keymaps (only active in oil buffers)
